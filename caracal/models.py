@@ -1,6 +1,7 @@
 from typing import Any, Optional, TypeAlias, List, Callable, Tuple, Dict
 from dataclasses import dataclass
 from collections import defaultdict
+from contextlib import contextmanager
 
 from django.db import models
 from django.db import transaction
@@ -19,6 +20,7 @@ StageCallbacks: TypeAlias = dict[Stage, List[Callback]]
 
 class CallbackRegisterModel:
     _registered_callbacks: StageCallbacks = {}
+    _context_skip_callbacks: set[str] = set()
 
     class Meta:
         abstract = True
@@ -86,19 +88,51 @@ class CallbackRegisterModel:
 
         return cls._registered_callbacks
 
-    def run_callbacks(self, stage: Stage, *args: Any, **kwargs: Any) -> None:
+    def _get_callbacks_by_stage(self, stage: Stage) -> List[Callback]:
         registered_callbacks: StageCallbacks = self._get_registered_callbacks()
+        return registered_callbacks.get(stage, [])
 
-        callbacks: List[Callback] = registered_callbacks.get(stage, [])
+    def _should_run_callback(self, callback: Callback) -> bool:
+        options: dict[str, Any] = callback.kwargs or {}
 
-        for callback in callbacks:
+        if "skip" in options:
+            return False
+
+        return True
+
+    @contextmanager
+    def skip_hooks(self, *method_names: str):
+        """
+        Temporarily disable specific callbacks for this model instance.
+        """
+        previous = set(getattr(self, "_context_skip_callbacks", set()))
+        self._context_skip_callbacks = previous | set(method_names)
+        try:
+            yield self
+        finally:
+            self._context_skip_callbacks = previous
+
+    def run_callbacks(
+        self,
+        stage: Stage,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        callbacks_to_run: List[Callback] = []
+
+        for callback in self._get_callbacks_by_stage(stage):
             method_name = getattr(callback.callback, "__name__", None)
 
             if not method_name:
                 raise TypeError("Registered callback must have a method name.")
 
-            method = getattr(self, method_name)
-            method(*args, **kwargs)
+            if not self._should_run_callback(callback):
+                continue
+
+            callbacks_to_run.append(callback)
+
+        for callback in callbacks_to_run:
+            callback.callback(*args, **kwargs)
 
 
 class LifeCycleModel(CallbackRegisterModel, models.Model):
@@ -128,14 +162,11 @@ class LifeCycleModel(CallbackRegisterModel, models.Model):
         validate_unique: bool = kwargs.pop("validate_unique", True)
         validate_constraints: bool = kwargs.pop("validate_constraints", True)
         validate_exclude: Optional[list[str]] = kwargs.pop("validate_exclude", None)
-        update_fields = kwargs.get("update_fields")
-        validate_exclude = self._build_validate_exclude(
+        update_fields: Optional[list[str] | tuple[str, ...] | set[str]] = kwargs.get("update_fields")
+        validate_exclude: Optional[list[str]] = self._build_validate_exclude(
             validate_exclude=validate_exclude,
             update_fields=update_fields,
         )
-
-        is_create: bool = self.pk is None
-        is_update: bool = not is_create
 
         if validate:
             self.full_clean(
@@ -143,6 +174,9 @@ class LifeCycleModel(CallbackRegisterModel, models.Model):
                 validate_unique=validate_unique,
                 validate_constraints=validate_constraints,
             )
+
+        is_create: bool = self.pk is None
+        is_update: bool = not is_create
 
         with transaction.atomic():
             self.run_callbacks("before_save", *args, **kwargs)

@@ -8,8 +8,9 @@ from caracal.constants import (
 
 def model_callback(stage, *callback_args, **callback_kwargs):
     def wrapper(function: Callable):
-        function._model_callback: bool = True
-        function._model_callback_stage: str = stage
+        setattr(function, "_model_callback", True)
+        setattr(function, "_model_callback_stage", stage)
+        setattr(function, "_model_callback_options", callback_kwargs)
 
         return function
 

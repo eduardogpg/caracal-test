@@ -26,7 +26,7 @@ class Product(LifeCycleModel):
     def __str__(self):
         return self.name
 
-    @before_save
+    @before_save(skip=True)
     def send_email(self, *args, **kwargs):
         print(f"Sending email for product {self.name}")
 
